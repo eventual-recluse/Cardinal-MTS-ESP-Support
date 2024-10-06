@@ -29,6 +29,7 @@
 #include "plugincontext.hpp"
 #include "engine/TerminalModule.hpp"
 #include "ModuleWidgets.hpp"
+#include "libMTSClient.cpp"
 
 #include <algorithm>
 
@@ -128,6 +129,8 @@ struct HostMIDI : TerminalModule {
         dsp::PulseGenerator continuePulse;
         dsp::PulseGenerator retriggerPulses[16];
 
+        MTSClient *mtsClient = 0;
+
         MidiInput(CardinalPluginContext* const pc)
             : pcontext(pc)
         {
@@ -137,7 +140,13 @@ struct HostMIDI : TerminalModule {
                 pwFilters[c].setTau(1 / 30.f);
                 modFilters[c].setTau(1 / 30.f);
             }
+            mtsClient = MTS_RegisterClient();
             reset();
+        }
+
+        virtual ~MidiInput()
+        {
+            MTS_DeregisterClient(mtsClient);
         }
 
         void reset()
@@ -294,7 +303,12 @@ struct HostMIDI : TerminalModule {
 
             for (int c = 0; c < channels; c++) {
                 float pw = pwValues[(polyMode == MPE_MODE) ? c : 0];
-                float pitch = (notes[c] - 60.f + pw * pwRange) / 12.f;
+                float note = notes[c];
+                if (mtsClient)
+                {
+                    note += MTS_RetuningInSemitones(mtsClient, notes[c], -1);
+                }
+                float pitch = (note - 60.f + pw * pwRange) / 12.f;
                 outputs[PITCH_OUTPUT].setVoltage(pitch, c);
                 outputs[GATE_OUTPUT].setVoltage(gates[c] && !gatesForceGap[c] ? 10.f : 0.f, c);
                 outputs[VELOCITY_OUTPUT].setVoltage(rescale(velocities[c], 0, 127, 0.f, 10.f), c);
@@ -322,9 +336,11 @@ struct HostMIDI : TerminalModule {
                 // note on
                 case 0x9: {
                     if (msg.getValue() > 0) {
-                        int c = msg.getChannel();
-                        pressNote(msg.getNote(), &c);
-                        velocities[c] = msg.getValue();
+                        if (!MTS_ShouldFilterNote(mtsClient, msg.getNote(), -1)) {
+                            int c = msg.getChannel();
+                            pressNote(msg.getNote(), &c);
+                            velocities[c] = msg.getValue();
+                        }
                     }
                     else {
                         // For some reason, some keyboards send a "note on" event with a velocity of 0 to signal that the key has been released.
